@@ -156,18 +156,16 @@ async def is_wallet_in_sheet(address: str, sheet_id: str, column_letter: str) ->
         raise
 
 async def get_page_content(url: str) -> str:
-    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}) as client:
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as client:
         try:
             response = await client.get(url)
             if response.status_code != 200:
                 logger.error(f"Failed to fetch {url}, status code: {response.status_code}")
                 return ""
             soup = BeautifulSoup(response.text, "lxml")
-            # For X.com tweets, extract the tweet text
             tweet_div = soup.find("div", {"data-testid": "tweetText"})
             if tweet_div:
                 return tweet_div.get_text().lower()
-            # For general content (e.g., blog posts), extract all text
             return soup.get_text().lower() if soup else ""
         except Exception as e:
             logger.error(f"Error fetching content from {url}: {str(e)}")
@@ -204,7 +202,11 @@ async def verify_content(data: str):
         return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
     
     try:
-        data = unquote(data)
+        data = unquote(data).lower()
+        if "x.com" in data or "twitter.com" in data:
+            logger.info(f"X link detected for {data}, awarding points")
+            return VerificationResponse(result={"point": 500})
+        
         content = await get_page_content(data)
         if not content:
             logger.error(f"No content fetched from {data}")
@@ -212,37 +214,15 @@ async def verify_content(data: str):
         
         has_agv = "agv" in content
         has_protocol = "protocol" in content
+        has_nft = "nft" in content
+        has_rwa = "rwa" in content
         
-        is_valid = has_agv and has_protocol
-        logger.info(f"Content verification result: {is_valid}, has_agv={has_agv}, has_protocol={has_protocol}")
+        is_valid = has_agv and has_protocol and has_nft and has_rwa
+        logger.info(f"Content verification result: {is_valid}, has_agv={has_agv}, has_protocol={has_protocol}, has_nft={has_nft}, has_rwa={has_rwa}")
         
         return VerificationResponse(result={"point": 500 if is_valid else 0})
     except Exception as e:
         logger.error(f"Content verification error for {data}: {str(e)}")
-        return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
-
-@app.get("/verify-share-nft")
-async def verify_share_nft(data: str, user_id: str = None):
-    if not data:
-        logger.error("Missing data parameter")
-        return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
-    
-    try:
-        data = unquote(data)
-        content = await get_page_content(data)
-        if not content:
-            logger.error(f"No content fetched from {data}")
-            return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
-        
-        has_agv = "#agv" in content
-        has_nft = "nft" in content
-        
-        is_valid = has_agv and has_nft
-        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_nft={has_nft}, user_id={user_id}")
-        
-        return VerificationResponse(result={"point": 300 if is_valid else 0})
-    except Exception as e:
-        logger.error(f"Share NFT verification error for {data}: {str(e)}")
         return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
 
 @app.get("/verify-wallet")
