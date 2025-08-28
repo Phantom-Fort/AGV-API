@@ -7,6 +7,7 @@ import os
 import json
 import re
 import logging
+from urllib.parse import unquote
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -19,6 +20,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# Get port from environment variable, default to 8000 for local testing
+port = int(os.getenv("PORT", 8000))
 
 app = FastAPI(
     title="AGV TaskOn Verification API",
@@ -173,21 +177,11 @@ async def get_page_content(url: str) -> str:
             await browser.close()
             return ""
 
-@app.post("/verify-agent-application")
-async def verify_agent_application(
-    request: Request,
-    authorization: Optional[str] = Header(None)
-) -> VerificationResponse:
-    try:
-        body = await request.json()
-    except:
-        logger.error("Invalid JSON body")
-        return VerificationResponse(result={"isValid": False}, error="Invalid JSON body")
-    
-    email = (body.get("email") or "").strip()
-    if not email:
-        logger.error("Missing email in request")
-        return VerificationResponse(result={"isValid": False}, error="Missing email")
+@app.get("/verify-agent-application")
+async def verify_agent_application(address: str):
+    if not address:
+        logger.error("Missing address parameter")
+        return VerificationResponse(result={"isValid": False}, error="Missing 'address' parameter")
     if not sheets_service:
         logger.error("Google Sheets integration not configured")
         return VerificationResponse(result={"isValid": False}, error="Google Sheets integration not configured")
@@ -196,26 +190,30 @@ async def verify_agent_application(
         return VerificationResponse(result={"isValid": False}, error="Agent sheet ID not configured")
     
     try:
-        found = await is_email_in_sheet(email, AGENT_SHEET_ID, AGENT_EMAIL_COLUMN)
-        logger.info(f"Email verification result for {email}: {found}")
-        return VerificationResponse(result={"isValid": found, "details": {"email": email, "found": found}})
+        # Decode URL-encoded address (e.g., %40 to @)
+        address = unquote(address)
+        found = await is_email_in_sheet(address, AGENT_SHEET_ID, AGENT_EMAIL_COLUMN)
+        logger.info(f"Agent application verification result for {address}: {found}")
+        return VerificationResponse(result={"isValid": found, "details": {"address": address, "found": found}})
     except HttpError as e:
-        logger.error(f"Google Sheets API error for email {email}: {str(e)}")
+        logger.error(f"Google Sheets API error for address {address}: {str(e)}")
         return VerificationResponse(result={"isValid": False}, error=f"Google Sheets API error: {str(e)}")
     except Exception as e:
-        logger.error(f"Error verifying email {email}: {str(e)}")
-        return VerificationResponse(result={"isValid": False}, error=f"Error verifying email: {str(e)}")
+        logger.error(f"Error verifying address {address}: {str(e)}")
+        return VerificationResponse(result={"isValid": False}, error=f"Error verifying address: {str(e)}")
 
 @app.get("/verify-content")
-async def verify_content(link: str):
-    if not link:
-        logger.error("Missing link parameter")
-        return VerificationResponse(result={"point": 0}, error="Missing 'link' parameter")
+async def verify_content(data: str):
+    if not data:
+        logger.error("Missing data parameter")
+        return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
     
     try:
-        content = await get_page_content(link)
+        # Decode URL-encoded data (e.g., %3A to :)
+        data = unquote(data)
+        content = await get_page_content(data)
         if not content:
-            logger.error(f"No content fetched from {link}")
+            logger.error(f"No content fetched from {data}")
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
         # Check for required hashtags and words
@@ -230,19 +228,21 @@ async def verify_content(link: str):
         
         return VerificationResponse(result={"point": 500 if is_valid else 0})
     except Exception as e:
-        logger.error(f"Content verification error for {link}: {str(e)}")
+        logger.error(f"Content verification error for {data}: {str(e)}")
         return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
 
 @app.get("/verify-share-nft")
-async def verify_share_nft(tweetUrl: str):
-    if not tweetUrl:
-        logger.error("Missing tweetUrl parameter")
-        return VerificationResponse(result={"point": 0}, error="Missing 'tweetUrl' parameter")
+async def verify_share_nft(data: str, user_id: str = None):
+    if not data:
+        logger.error("Missing data parameter")
+        return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
     
     try:
-        content = await get_page_content(tweetUrl)
+        # Decode URL-encoded data (e.g., %3A to :)
+        data = unquote(data)
+        content = await get_page_content(data)
         if not content:
-            logger.error(f"No content fetched from {tweetUrl}")
+            logger.error(f"No content fetched from {data}")
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
         # Check for required hashtags and tag
@@ -252,11 +252,11 @@ async def verify_share_nft(tweetUrl: str):
         has_agvprotocol = "@agvprotocol" in content
         
         is_valid = has_agv and has_tree and has_rwa and has_agvprotocol
-        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agvprotocol={has_agvprotocol}")
+        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agvprotocol={has_agvprotocol}, user_id={user_id}")
         
         return VerificationResponse(result={"point": 300 if is_valid else 0})
     except Exception as e:
-        logger.error(f"Share NFT verification error for {tweetUrl}: {str(e)}")
+        logger.error(f"Share NFT verification error for {data}: {str(e)}")
         return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
 
 @app.get("/verify-wallet")
