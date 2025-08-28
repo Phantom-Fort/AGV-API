@@ -13,7 +13,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
 import asyncio
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+import httpx
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -54,13 +55,11 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 try:
     if GOOGLE_CREDENTIALS:
-        # Load credentials from environment variable (for Render)
         credentials_info = json.loads(GOOGLE_CREDENTIALS)
         credentials = service_account.Credentials.from_service_account_info(
             credentials_info, scopes=SCOPES
         )
     else:
-        # Fallback to local creds.json (for local development)
         credentials = service_account.Credentials.from_service_account_file(
             os.getenv("GOOGLE_CREDENTIALS_PATH", "./creds.json"), scopes=SCOPES
         )
@@ -70,7 +69,6 @@ except Exception as e:
     sheets_service = None
 
 def column_letter_to_index(letter: str) -> int:
-    """Convert a column letter (e.g., 'F', 'S') to a 0-based index."""
     try:
         letter = letter.upper().strip()
         if not letter or not all(c.isalpha() for c in letter):
@@ -158,23 +156,21 @@ async def is_wallet_in_sheet(address: str, sheet_id: str, column_letter: str) ->
         raise
 
 async def get_page_content(url: str) -> str:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}) as client:
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)  # 30-second timeout
-            content = await page.content()
-            # Extract text content from the page
-            text = await page.text_content("*")
-            await browser.close()
-            return text.lower() if text else ""
-        except PlaywrightTimeoutError:
-            logger.error(f"Timeout fetching content from {url}")
-            await browser.close()
-            return ""
+            response = await client.get(url)
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch {url}, status code: {response.status_code}")
+                return ""
+            soup = BeautifulSoup(response.text, "lxml")
+            # For X.com tweets, extract the tweet text
+            tweet_div = soup.find("div", {"data-testid": "tweetText"})
+            if tweet_div:
+                return tweet_div.get_text().lower()
+            # For general content (e.g., blog posts), extract all text
+            return soup.get_text().lower() if soup else ""
         except Exception as e:
             logger.error(f"Error fetching content from {url}: {str(e)}")
-            await browser.close()
             return ""
 
 @app.get("/verify-agent-application")
@@ -190,7 +186,6 @@ async def verify_agent_application(address: str):
         return VerificationResponse(result={"isValid": False}, error="Agent sheet ID not configured")
     
     try:
-        # Decode URL-encoded address (e.g., %40 to @)
         address = unquote(address)
         found = await is_email_in_sheet(address, AGENT_SHEET_ID, AGENT_EMAIL_COLUMN)
         logger.info(f"Agent application verification result for {address}: {found}")
@@ -209,14 +204,12 @@ async def verify_content(data: str):
         return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
     
     try:
-        # Decode URL-encoded data (e.g., %3A to :)
         data = unquote(data)
         content = await get_page_content(data)
         if not content:
             logger.error(f"No content fetched from {data}")
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
-        # Check for required hashtags and words
         has_agv = "#agv" in content
         has_tree = "#tree" in content
         has_rwa = "#rwa" in content
@@ -238,14 +231,12 @@ async def verify_share_nft(data: str, user_id: str = None):
         return VerificationResponse(result={"point": 0}, error="Missing 'data' parameter")
     
     try:
-        # Decode URL-encoded data (e.g., %3A to :)
         data = unquote(data)
         content = await get_page_content(data)
         if not content:
             logger.error(f"No content fetched from {data}")
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
-        # Check for required hashtags and tag
         has_agv = "#agv" in content
         has_tree = "#tree" in content
         has_rwa = "#rwa" in content
