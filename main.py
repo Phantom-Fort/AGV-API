@@ -5,13 +5,14 @@ from typing import Optional
 from pydantic import BaseModel
 import os
 import json
-import httpx
 import re
 import logging
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
+import asyncio
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -92,11 +93,9 @@ async def is_email_in_sheet(email: str, sheet_id: str, column_letter: str) -> bo
     
     email_lower = email.strip().lower()
     try:
-        # Get the first sheet's name
         sheet_metadata = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheet_name = sheet_metadata["sheets"][0]["properties"]["title"]
         
-        # Directly fetch the specified column
         result = sheets_service.spreadsheets().values().get(
             spreadsheetId=sheet_id,
             range=f"{sheet_name}!{column_letter}:{column_letter}"
@@ -106,7 +105,6 @@ async def is_email_in_sheet(email: str, sheet_id: str, column_letter: str) -> bo
             logger.info("No data found in sheet")
             return False
         
-        # Check for the email (skip header row)
         for row in values[1:]:
             if row and row[0].strip().lower() == email_lower:
                 logger.info(f"Email {email_lower} found in sheet")
@@ -130,11 +128,9 @@ async def is_wallet_in_sheet(address: str, sheet_id: str, column_letter: str) ->
     
     address_lower = address.strip().lower()
     try:
-        # Get the first sheet's name
         sheet_metadata = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheet_name = sheet_metadata["sheets"][0]["properties"]["title"]
         
-        # Get all values in the specified column
         result = sheets_service.spreadsheets().values().get(
             spreadsheetId=sheet_id,
             range=f"{sheet_name}!{column_letter}:{column_letter}"
@@ -144,7 +140,6 @@ async def is_wallet_in_sheet(address: str, sheet_id: str, column_letter: str) ->
             logger.info("No data found in sheet")
             return False
         
-        # Check rows for the wallet address (skip header row)
         for row in values[1:]:
             if row and row[0].strip().lower() == address_lower:
                 logger.info(f"Wallet {address_lower} found in sheet")
@@ -157,6 +152,26 @@ async def is_wallet_in_sheet(address: str, sheet_id: str, column_letter: str) ->
     except Exception as e:
         logger.error(f"Error querying sheet: {str(e)}")
         raise
+
+async def get_page_content(url: str) -> str:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=30000)  # 30-second timeout
+            content = await page.content()
+            # Extract text content from the page
+            text = await page.text_content("*")
+            await browser.close()
+            return text.lower() if text else ""
+        except PlaywrightTimeoutError:
+            logger.error(f"Timeout fetching content from {url}")
+            await browser.close()
+            return ""
+        except Exception as e:
+            logger.error(f"Error fetching content from {url}: {str(e)}")
+            await browser.close()
+            return ""
 
 @app.post("/verify-agent-application")
 async def verify_agent_application(
@@ -191,83 +206,57 @@ async def verify_agent_application(
         logger.error(f"Error verifying email {email}: {str(e)}")
         return VerificationResponse(result={"isValid": False}, error=f"Error verifying email: {str(e)}")
 
-@app.post("/verify-content")
-async def verify_content(
-    request: Request,
-    authorization: Optional[str] = Header(None)
-) -> VerificationResponse:
-    try:
-        body = await request.json()
-    except:
-        logger.error("Invalid JSON body")
-        return VerificationResponse(result={"point": 0}, error="Invalid JSON body")
-    
-    link = (body.get("link") or "").strip()
+@app.get("/verify-content")
+async def verify_content(link: str):
     if not link:
-        logger.error("Missing link in request")
-        return VerificationResponse(result={"point": 0}, error="Missing 'link' in request body")
+        logger.error("Missing link parameter")
+        return VerificationResponse(result={"point": 0}, error="Missing 'link' parameter")
     
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            logger.info(f"Fetching content from {link}")
-            r = await client.get(link)
-            if r.status_code >= 400:
-                logger.warning(f"Unreachable URL {link}: Status {r.status_code}")
-                return VerificationResponse(result={"point": 0}, error=f"Unreachable URL: Status {r.status_code}")
-            text = r.text.lower()
+        content = await get_page_content(link)
+        if not content:
+            logger.error(f"No content fetched from {link}")
+            return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
-        # Check for required hashtags and sentence
-        has_hashtags = all(tag in text for tag in ["#agv", "#tree", "#rwa"])
-        has_sentence = "agv protocol" in text
+        # Check for required hashtags and words
+        has_agv = "#agv" in content
+        has_tree = "#tree" in content
+        has_rwa = "#rwa" in content
+        has_agv_word = "agv" in content
+        has_protocol_word = "protocol" in content
         
-        is_valid = has_hashtags and has_sentence
-        logger.info(f"Content verification result: {is_valid}, has_hashtags={has_hashtags}, has_sentence={has_sentence}")
+        is_valid = has_agv and has_tree and has_rwa and has_agv_word and has_protocol_word
+        logger.info(f"Content verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agv_word={has_agv_word}, has_protocol_word={has_protocol_word}")
         
         return VerificationResponse(result={"point": 500 if is_valid else 0})
     except Exception as e:
-        logger.error(f"Content fetch error: {str(e)}")
-        return VerificationResponse(result={"point": 0}, error=f"Fetch error: {str(e)}")
+        logger.error(f"Content verification error for {link}: {str(e)}")
+        return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
 
-@app.post("/verify-share-nft")
-async def verify_share_nft(
-    request: Request,
-    authorization: Optional[str] = Header(None)
-) -> VerificationResponse:
-    try:
-        body = await request.json()
-    except:
-        logger.error("Invalid JSON body")
-        return VerificationResponse(result={"point": 0}, error="Invalid JSON body")
-    
-    tweet_url = (body.get("tweetUrl") or "").strip()
-    if not tweet_url:
-        logger.error("Missing tweetUrl in request")
-        return VerificationResponse(result={"point": 0}, error="Missing 'tweetUrl' in request body")
-    
-    tweet_id = extract_tweet_id_from_url(tweet_url)
-    if not tweet_id:
-        logger.error(f"Invalid X post URL: {tweet_url}")
-        return VerificationResponse(result={"point": 0}, error="Invalid X post URL")
+@app.get("/verify-share-nft")
+async def verify_share_nft(tweetUrl: str):
+    if not tweetUrl:
+        logger.error("Missing tweetUrl parameter")
+        return VerificationResponse(result={"point": 0}, error="Missing 'tweetUrl' parameter")
     
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            logger.info(f"Fetching X post from {tweet_url}")
-            r = await client.get(tweet_url)
-            if r.status_code >= 400:
-                logger.warning(f"Unreachable X post {tweet_url}: Status {r.status_code}")
-                return VerificationResponse(result={"point": 0}, error=f"Unreachable X post: Status {r.status_code}")
-            text = r.text.lower()
+        content = await get_page_content(tweetUrl)
+        if not content:
+            logger.error(f"No content fetched from {tweetUrl}")
+            return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
         # Check for required hashtags and tag
-        has_hashtags = all(tag in text for tag in ["#agv", "#tree", "#rwa"])
-        has_tag = "@agvprotocol" in text
+        has_agv = "#agv" in content
+        has_tree = "#tree" in content
+        has_rwa = "#rwa" in content
+        has_agvprotocol = "@agvprotocol" in content
         
-        is_valid = has_hashtags and has_tag
-        logger.info(f"Share NFT verification result: {is_valid}, has_hashtags={has_hashtags}, has_tag={has_tag}")
+        is_valid = has_agv and has_tree and has_rwa and has_agvprotocol
+        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agvprotocol={has_agvprotocol}")
         
         return VerificationResponse(result={"point": 300 if is_valid else 0})
     except Exception as e:
-        logger.error(f"X post verification error: {str(e)}")
+        logger.error(f"Share NFT verification error for {tweetUrl}: {str(e)}")
         return VerificationResponse(result={"point": 0}, error=f"Verification error: {str(e)}")
 
 @app.get("/verify-wallet")
