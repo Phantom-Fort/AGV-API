@@ -210,14 +210,11 @@ async def verify_content(data: str):
             logger.error(f"No content fetched from {data}")
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
-        has_agv = "#agv" in content
-        has_tree = "#tree" in content
-        has_rwa = "#rwa" in content
-        has_agv_word = "agv" in content
-        has_protocol_word = "protocol" in content
+        has_agv = "agv" in content
+        has_protocol = "protocol" in content
         
-        is_valid = has_agv and has_tree and has_rwa and has_agv_word and has_protocol_word
-        logger.info(f"Content verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agv_word={has_agv_word}, has_protocol_word={has_protocol_word}")
+        is_valid = has_agv and has_protocol
+        logger.info(f"Content verification result: {is_valid}, has_agv={has_agv}, has_protocol={has_protocol}")
         
         return VerificationResponse(result={"point": 500 if is_valid else 0})
     except Exception as e:
@@ -238,12 +235,10 @@ async def verify_share_nft(data: str, user_id: str = None):
             return VerificationResponse(result={"point": 0}, error="Failed to fetch content")
         
         has_agv = "#agv" in content
-        has_tree = "#tree" in content
-        has_rwa = "#rwa" in content
-        has_agvprotocol = "@agvprotocol" in content
+        has_nft = "nft" in content
         
-        is_valid = has_agv and has_tree and has_rwa and has_agvprotocol
-        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_tree={has_tree}, has_rwa={has_rwa}, has_agvprotocol={has_agvprotocol}, user_id={user_id}")
+        is_valid = has_agv and has_nft
+        logger.info(f"Share NFT verification result: {is_valid}, has_agv={has_agv}, has_nft={has_nft}, user_id={user_id}")
         
         return VerificationResponse(result={"point": 300 if is_valid else 0})
     except Exception as e:
